@@ -251,7 +251,13 @@ const App: React.FC = () => {
     // 3. If Valid, Send to Server. If Invalid, BLOCK update.
     if (validation.isValid) {
       // Global checks (safe to allow save if positive, inputs usually handle type="number" min="0")
-      if (settingsToSave.tp_value < 0 || settingsToSave.limit_price < 0) return;
+      if (
+        settingsToSave.buy_tp_value < 0 ||
+        settingsToSave.sell_tp_value < 0 ||
+        settingsToSave.buy_limit_price < 0 ||
+        settingsToSave.sell_limit_price < 0
+      )
+        return;
 
       const success = await api.updateSettings(settingsToSave);
       if (success) {

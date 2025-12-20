@@ -1,6 +1,6 @@
 """
 High-Frequency Grid Trading System - Production Server
-VERSION: 3.2.4 - ALERT UPDATE SUPPORT
+VERSION: 3.3.0 - SEPARATE BUY/SELL TARGETS & LIMIT PRICES
 Stack: Python 3.9+, FastAPI, Uvicorn
 """
 
@@ -67,13 +67,15 @@ class RuntimeState(BaseModel):
     buy_id: str = ""
     sell_id: str = ""
     
-    # New Flags to handle the "Closing Phase"
+    # Closing Phase Flags
     buy_is_closing: bool = False
     sell_is_closing: bool = False
     
+    # Separate Limit Price Waiting Flags
     buy_waiting_limit: bool = False
     sell_waiting_limit: bool = False
     
+    # Separate Start References
     buy_start_ref: float = 0.0
     sell_start_ref: float = 0.0
     
@@ -90,9 +92,16 @@ class RuntimeState(BaseModel):
     error_status: str = "" 
 
 class UserSettings(BaseModel):
-    limit_price: float = 0.0
-    tp_type: str = "equity_pct"
-    tp_value: float = 0.0
+    # Separate Limit Prices
+    buy_limit_price: float = 0.0
+    sell_limit_price: float = 0.0
+    
+    # Separate Take Profit Settings
+    buy_tp_type: str = "equity_pct"
+    buy_tp_value: float = 0.0
+    sell_tp_type: str = "equity_pct"
+    sell_tp_value: float = 0.0
+    
     rows_buy: List[GridRow] = []
     rows_sell: List[GridRow] = []
 
@@ -211,33 +220,60 @@ def update_exec_stats(tick: TickData):
     rt.buy_exec_map = buy_map
     rt.sell_exec_map = sell_map
 
-def check_tp(tick: TickData) -> int:
+def check_tp_buy(tick: TickData) -> int:
+    """Check if BUY side take profit is hit"""
     st = state.settings
     rt = state.runtime
     
-    if st.tp_value <= 0:
+    if st.buy_tp_value <= 0 or not rt.buy_id:
         return -1
     
-    relevant_positions = [
-        p for p in tick.positions 
-        if (rt.buy_id and rt.buy_id in p.comment) or (rt.sell_id and rt.sell_id in p.comment)
-    ]
+    buy_positions = [p for p in tick.positions if rt.buy_id in p.comment]
     
-    if not relevant_positions:
+    if not buy_positions:
         return 0
     
-    profit = sum(p.profit for p in relevant_positions)
+    profit = sum(p.profit for p in buy_positions)
     
     target = 0.0
-    if st.tp_type == "equity_pct":
-        target = tick.equity * (st.tp_value / 100.0)
-    elif st.tp_type == "balance_pct":
-        target = tick.balance * (st.tp_value / 100.0)
-    elif st.tp_type == "fixed_money":
-        target = st.tp_value
+    if st.buy_tp_type == "equity_pct":
+        target = tick.equity * (st.buy_tp_value / 100.0)
+    elif st.buy_tp_type == "balance_pct":
+        target = tick.balance * (st.buy_tp_value / 100.0)
+    elif st.buy_tp_type == "fixed_money":
+        target = st.buy_tp_value
     
     if target > 0 and profit >= target:
-        print(f"[TP HIT] ${profit:.2f} >= ${target:.2f}")
+        print(f"[BUY TP HIT] ${profit:.2f} >= ${target:.2f}")
+        return 1
+        
+    return 0
+
+def check_tp_sell(tick: TickData) -> int:
+    """Check if SELL side take profit is hit"""
+    st = state.settings
+    rt = state.runtime
+    
+    if st.sell_tp_value <= 0 or not rt.sell_id:
+        return -1
+    
+    sell_positions = [p for p in tick.positions if rt.sell_id in p.comment]
+    
+    if not sell_positions:
+        return 0
+    
+    profit = sum(p.profit for p in sell_positions)
+    
+    target = 0.0
+    if st.sell_tp_type == "equity_pct":
+        target = tick.equity * (st.sell_tp_value / 100.0)
+    elif st.sell_tp_type == "balance_pct":
+        target = tick.balance * (st.sell_tp_value / 100.0)
+    elif st.sell_tp_type == "fixed_money":
+        target = st.sell_tp_value
+    
+    if target > 0 and profit >= target:
+        print(f"[SELL TP HIT] ${profit:.2f} >= ${target:.2f}")
         return 1
         
     return 0
@@ -251,7 +287,7 @@ def count_active_trades(tick: TickData, hash_id: str) -> int:
 
 # --- FastAPI App ---
 
-app = FastAPI(title="Grid Trading Server", version="3.2.4")
+app = FastAPI(title="Grid Trading Server", version="3.3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -273,13 +309,14 @@ async def validation_handler(request: Request, exc: RequestValidationError):
 @app.on_event("startup")
 async def startup():
     print("=" * 60)
-    print("Grid Trading Server v3.2.4 - READY")
+    print("Grid Trading Server v3.3.0 - READY")
+    print("Separate Buy/Sell Targets & Limit Prices")
     print("=" * 60)
     load_state()
 
 @app.get("/")
 async def root():
-    return {"status": "running", "version": "3.2.4"}
+    return {"status": "running", "version": "3.3.0"}
 
 @app.post("/api/tick")
 async def handle_tick(request: Request):
@@ -344,16 +381,15 @@ async def handle_tick(request: Request):
                 rt.buy_exec_map = {}
                 
                 if rt.cyclic_on:
-                    rt.buy_id = "" # Clear ID to allow new session
+                    rt.buy_id = ""
                     rt.buy_start_ref = mid
                 else:
                     rt.buy_on = False
                     rt.buy_id = ""
                     rt.buy_start_ref = 0.0
                 save_state()
-                return {"action": "WAIT"} # Logic handled, return wait
+                return {"action": "WAIT"}
             else:
-                # Trades still exist, keep commanding Close
                 return {"action": "CLOSE_ALL", "comment": rt.buy_id}
 
         # Check Sell Closing Phase
@@ -376,26 +412,29 @@ async def handle_tick(request: Request):
             else:
                 return {"action": "CLOSE_ALL", "comment": rt.sell_id}
 
-        # Priority 2: TP Logic
-        if rt.buy_id or rt.sell_id:
-            tp_result = check_tp(tick)
+        # Priority 2: TP Logic - Check Buy Side
+        if rt.buy_id:
+            tp_result = check_tp_buy(tick)
             if tp_result == 1:
-                rt.pending_actions = []
-                
-                # Initiate Closing Phase
-                if rt.buy_id: rt.buy_is_closing = True
-                if rt.sell_id: rt.sell_is_closing = True
-                
-                print("[TP HIT] Initiating Close Sequence...")
+                rt.buy_is_closing = True
+                print("[BUY TP HIT] Initiating Buy Close Sequence...")
                 save_state()
-                return {"action": "CLOSE_ALL", "comment": "server"}
+                return {"action": "CLOSE_ALL", "comment": rt.buy_id}
+
+        # Priority 2: TP Logic - Check Sell Side
+        if rt.sell_id:
+            tp_result = check_tp_sell(tick)
+            if tp_result == 1:
+                rt.sell_is_closing = True
+                print("[SELL TP HIT] Initiating Sell Close Sequence...")
+                save_state()
+                return {"action": "CLOSE_ALL", "comment": rt.sell_id}
 
         # Priority 3: External Close (Manual Close Detection)
         
         # Buy Side
         if rt.buy_id and len(rt.buy_exec_map) > 0 and not rt.buy_is_closing:
             mt5_count = count_active_trades(tick, rt.buy_id)
-            server_count = len(rt.buy_exec_map)
             
             if mt5_count == 0:
                 print(f"[EXTERNAL CLOSE] Buy Session Ended Manually.")
@@ -412,7 +451,6 @@ async def handle_tick(request: Request):
         # Sell Side
         if rt.sell_id and len(rt.sell_exec_map) > 0 and not rt.sell_is_closing:
             mt5_count = count_active_trades(tick, rt.sell_id)
-            server_count = len(rt.sell_exec_map)
             
             if mt5_count == 0:
                 print(f"[EXTERNAL CLOSE] Sell Session Ended Manually.")
@@ -428,32 +466,28 @@ async def handle_tick(request: Request):
         
         # Priority 4: BUY Entry
         if rt.buy_on and not rt.buy_is_closing:
-            # limit price
             if not rt.buy_id:
                 rt.buy_id = get_hash("buy")
                 rt.buy_exec_map = {}
-                rt.buy_start_ref = st.limit_price if st.limit_price > 0 else tick.ask
-                rt.buy_waiting_limit = st.limit_price > 0
+                rt.buy_start_ref = st.buy_limit_price if st.buy_limit_price > 0 else tick.ask
+                rt.buy_waiting_limit = st.buy_limit_price > 0
                 print(f"[BUY] Start: {rt.buy_id} Ref: {rt.buy_start_ref}")
                 save_state()
             
             if rt.buy_waiting_limit:
-                if tick.ask <= st.limit_price:
+                if tick.ask <= st.buy_limit_price:
                     rt.buy_waiting_limit = False
                     rt.buy_start_ref = tick.ask
+                    print(f"[BUY] Limit price reached. Starting grid at {rt.buy_start_ref}")
                     save_state()
             else:
                 idx = len(rt.buy_exec_map)
                 if idx < len(st.rows_buy):
                     row = st.rows_buy[idx]
-                    # --- BETTER LOCATION: Check immediately before math ---
                     if row.dollar <= 0 or row.lots <= 0:
-                        # Stop processing. Do not calculate price. Do not execute.
-                        # This effectively pauses the grid at this invalid row.
                         return {"action": "WAIT"} 
                     target = calculate_grid_level_price("buy", idx)
                     if tick.ask <= target:
-                        row = st.rows_buy[idx]
                         rt.buy_exec_map[str(idx)] = RowExecStats(
                             index=idx, 
                             entry_price=tick.ask, 
@@ -475,26 +509,25 @@ async def handle_tick(request: Request):
             if not rt.sell_id:
                 rt.sell_id = get_hash("sell")
                 rt.sell_exec_map = {}
-                rt.sell_start_ref = st.limit_price if st.limit_price > 0 else tick.bid
-                rt.sell_waiting_limit = st.limit_price > 0
+                rt.sell_start_ref = st.sell_limit_price if st.sell_limit_price > 0 else tick.bid
+                rt.sell_waiting_limit = st.sell_limit_price > 0
                 print(f"[SELL] Start: {rt.sell_id} Ref: {rt.sell_start_ref}")
                 save_state()
             
             if rt.sell_waiting_limit:
-                if tick.bid >= st.limit_price:
+                if tick.bid >= st.sell_limit_price:
                     rt.sell_waiting_limit = False
                     rt.sell_start_ref = tick.bid
+                    print(f"[SELL] Limit price reached. Starting grid at {rt.sell_start_ref}")
                     save_state()
             else:
                 idx = len(rt.sell_exec_map)
                 if idx < len(st.rows_sell):
                     row = st.rows_sell[idx]
-                    # --- BETTER LOCATION ---
                     if row.dollar <= 0 or row.lots <= 0:
                         return {"action": "WAIT"}
                     target = calculate_grid_level_price("sell", idx)
                     if tick.bid >= target:
-                        row = st.rows_sell[idx]
                         rt.sell_exec_map[str(idx)] = RowExecStats(
                             index=idx,
                             entry_price=tick.bid, 
@@ -522,13 +555,20 @@ async def handle_tick(request: Request):
 async def update_settings(new: UserSettings):
     try:
         rt = state.runtime
-        # Basic validation for TP
-        if new.tp_value < 0:
-             raise Exception("TP value cannot be negative")
+        
+        # Validation
+        if new.buy_tp_value < 0 or new.sell_tp_value < 0:
+             raise Exception("TP values cannot be negative")
 
-        state.settings.limit_price = new.limit_price
-        state.settings.tp_type = new.tp_type
-        state.settings.tp_value = new.tp_value
+        # Update separate limit prices
+        state.settings.buy_limit_price = new.buy_limit_price
+        state.settings.sell_limit_price = new.sell_limit_price
+        
+        # Update separate TP settings
+        state.settings.buy_tp_type = new.buy_tp_type
+        state.settings.buy_tp_value = new.buy_tp_value
+        state.settings.sell_tp_type = new.sell_tp_type
+        state.settings.sell_tp_value = new.sell_tp_value
         
         # --- Buy Rows ---
         final_buy_rows = []
@@ -541,12 +581,11 @@ async def update_settings(new: UserSettings):
             # If executed, use OLD data for locked fields, but NEW data for Alert
             if str(new_row.index) in rt.buy_exec_map and new_row.index in current_buy_rows_dict:
                  old = current_buy_rows_dict[new_row.index]
-                 # Merge: Keep old logic, take new alert
                  merged_row = GridRow(
                      index=old.index,
-                     dollar=old.dollar, # Lock
-                     lots=old.lots,     # Lock
-                     alert=new_row.alert # Update
+                     dollar=old.dollar,
+                     lots=old.lots,
+                     alert=new_row.alert
                  )
                  final_buy_rows.append(merged_row)
             else:
@@ -594,7 +633,6 @@ async def control(
         
         if emergency_close:
             rt.buy_on = rt.sell_on = rt.cyclic_on = False
-            # Force Close flag to true to ensure cleanup logic runs if needed
             rt.buy_is_closing = rt.sell_is_closing = True 
             rt.pending_actions.append("CLOSE_ALL_EMERGENCY")
             rt.error_status = "" 
@@ -604,7 +642,6 @@ async def control(
         if buy_switch is not None:
             if rt.buy_on and not buy_switch:
                 rt.pending_actions.append("CLOSE_ALL_BUY")
-                # Also set closing flag for safety
                 rt.buy_is_closing = True
             rt.buy_on = buy_switch
         
@@ -641,7 +678,7 @@ async def health():
     return {
         "status": "healthy" if not rt.error_status else "error",
         "error": rt.error_status,
-        "version": "3.2.4",
+        "version": "3.3.0",
         "buy": rt.buy_on,
         "sell": rt.sell_on,
         "price": rt.current_price

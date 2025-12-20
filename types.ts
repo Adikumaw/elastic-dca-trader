@@ -1,4 +1,3 @@
-
 export type TradeSide = 'BUY' | 'SELL';
 
 export type TpType = 'equity_pct' | 'balance_pct' | 'fixed_money';
@@ -23,9 +22,15 @@ export interface RowExecStats {
 }
 
 export interface UserSettings {
-  limit_price: number;
-  tp_type: TpType;
-  tp_value: number;
+  buy_limit_price: number;
+  sell_limit_price: number;
+
+  buy_tp_type: TpType;
+  buy_tp_value: number;
+
+  sell_tp_type: TpType;
+  sell_tp_value: number;
+
   rows_buy: GridRow[];
   rows_sell: GridRow[];
 }
@@ -85,9 +90,12 @@ export const createEmptyGrid = (): GridRow[] =>
   }));
 
 export const DEFAULT_SETTINGS: UserSettings = {
-  limit_price: 0,
-  tp_type: 'equity_pct',
-  tp_value: 1.5,
+  buy_limit_price: 0,
+  sell_limit_price: 0,
+  buy_tp_type: 'equity_pct',
+  buy_tp_value: 1.5,
+  sell_tp_type: 'equity_pct',
+  sell_tp_value: 1.5,
   rows_buy: createEmptyGrid(),
   rows_sell: createEmptyGrid()
 };

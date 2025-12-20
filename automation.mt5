@@ -1,11 +1,11 @@
 //+------------------------------------------------------------------+
 //|                                                TradingClient.mq5 |
-//|                                  Grid Trading System Client v2.0 |
-//|                                     Production-Ready MT5 Client  |
+//|                                  Grid Trading System Client v2.1 |
+//|                          Production-Ready MT5 Client - Hash IDs  |
 //+------------------------------------------------------------------+
 #property copyright "Grid Trading System"
 #property link      "https://www.gridtrading.com"
-#property version   "2.00"
+#property version   "2.10"
 #property strict
 
 //--- Input Parameters ---
@@ -40,7 +40,7 @@ int OnInit()
    EventSetTimer(1);
    
    Print("==================================================");
-   Print("Grid Trading Client v2.0 Initialized");
+   Print("Grid Trading Client v2.1 Initialized");
    Print("==================================================");
    Print("Broker: ", g_BrokerName);
    Print("Account: ", g_AccountID);
@@ -188,7 +188,7 @@ void SendTickToServer(string jsonPayload)
    
    // Remove null terminator that MQL5 automatically adds
    if(len > 0)
-      ArrayResize(data, len - 1);  // ← THIS IS THE FIX!
+      ArrayResize(data, len - 1);
    
    // Send POST request
    ResetLastError();
@@ -266,22 +266,24 @@ void ProcessServerResponse(string response)
    {
       string comment = ExtractJsonValue(response, "comment");
       
-      if(comment == "EMERGENCY")
+      if(comment == "")
       {
-         Print("[ACTION] EMERGENCY CLOSE ALL");
+         Print("[WARN] CLOSE_ALL received but no comment specified");
+         return;
+      }
+      
+      // Check for special keywords
+      if(comment == "server" || comment == "EMERGENCY")
+      {
+         Print("[ACTION] EMERGENCY CLOSE ALL POSITIONS");
          CloseAllPositions();
+         return;
       }
-      else if(comment == "TP_HIT")
-      {
-         Print("[ACTION] Take Profit Hit - Closing All");
-         CloseAllPositions();
-      }
-      else if(comment != "")
-      {
-         // Close positions with specific hash ID
-         Print("[ACTION] Closing positions with ID: ", comment);
-         ClosePositionsByComment(comment);
-      }
+      
+      // Otherwise, it's a hash ID (buy_XXXXXXXX or sell_XXXXXXXX)
+      // Close only positions matching this hash
+      Print("[ACTION] Closing positions with ID: ", comment);
+      ClosePositionsByComment(comment);
       
       return;
    }
@@ -292,9 +294,14 @@ void ProcessServerResponse(string response)
       string sVolume = ExtractJsonValue(response, "volume");
       double volume = StringToDouble(sVolume);
       string comment = ExtractJsonValue(response, "comment");
+      bool alert = ExtractJsonBool(response, "alert");
       
       if(volume > 0 && comment != "")
       {
+         if(alert)
+         {
+            Alert("🟢 BUY SIGNAL: ", g_Symbol, " | Volume: ", volume, " | ", comment);
+         }
          ExecuteBuyOrder(volume, comment);
       }
       else
@@ -311,9 +318,14 @@ void ProcessServerResponse(string response)
       string sVolume = ExtractJsonValue(response, "volume");
       double volume = StringToDouble(sVolume);
       string comment = ExtractJsonValue(response, "comment");
+      bool alert = ExtractJsonBool(response, "alert");
       
       if(volume > 0 && comment != "")
       {
+         if(alert)
+         {
+            Alert("🔴 SELL SIGNAL: ", g_Symbol, " | Volume: ", volume, " | ", comment);
+         }
          ExecuteSellOrder(volume, comment);
       }
       else
@@ -388,6 +400,15 @@ string ExtractJsonValue(string json, string key)
    }
    
    return StringSubstr(json, pos, endPos - pos);
+}
+
+//+------------------------------------------------------------------+
+//| Extract boolean value from JSON string                           |
+//+------------------------------------------------------------------+
+bool ExtractJsonBool(string json, string key)
+{
+   string value = ExtractJsonValue(json, key);
+   return (value == "true" || value == "True" || value == "1");
 }
 
 //+------------------------------------------------------------------+
@@ -541,6 +562,7 @@ void ClosePositionsByComment(string commentFilter)
 {
    int total = PositionsTotal();
    int closed = 0;
+   int matched = 0;
    
    for(int i = total - 1; i >= 0; i--)
    {
@@ -550,9 +572,10 @@ void ClosePositionsByComment(string commentFilter)
       {
          string comment = PositionGetString(POSITION_COMMENT);
          
-         // Check if comment contains filter string
+         // Check if comment contains filter string (the hash ID)
          if(StringFind(comment, commentFilter) != -1)
          {
+            matched++;
             if(ClosePosition(ticket))
             {
                closed++;
@@ -561,7 +584,10 @@ void ClosePositionsByComment(string commentFilter)
       }
    }
    
-   Print("[CLOSE] Closed ", closed, " positions with comment: ", commentFilter);
+   if(InpDebugMode)
+   {
+      Print("[CLOSE] Found ", matched, " positions matching '", commentFilter, "', closed ", closed);
+   }
 }
 
 //+------------------------------------------------------------------+
