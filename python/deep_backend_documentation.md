@@ -2,14 +2,15 @@
 
 ## 🎯 Overview
 
-**Server Version:** `3.3.0` (Separate Buy/Sell Management)  
+**Server Version:** `3.4.0` (Loss Hedge Feature)  
 **Base URL:** `http://127.0.0.1:8000`  
 **Protocol:** HTTP/JSON  
 **Authentication:** None (Local deployment)  
 **CORS:** Enabled for all origins
 
-> **⭐ Key Update (v3.3.0):**  
-> The Buy and Sell sides are now **completely independent**. You can set a Limit Price for Buys while executing Sells at Market. You can set a 1% Equity TP for Buys and a Fixed $50 TP for Sells.
+> **⭐ Key Updates (v3.4.0):**  
+> 1. **Loss Hedge Logic:** You can now set a "Hedge Value" ($). If a side loses that amount, it freezes, and a counter-trade equal to the total volume is immediately executed on the opposite side.
+> 2. **Dynamic Gap Calculation:** When hedging into an active grid, the system calculates the gap dynamically based on the current market price.
 
 ---
 
@@ -18,9 +19,8 @@
 1. [Quick Start](#quick-start)
 2. [Data Flow & Lifecycle](#data-flow--lifecycle)
 3. [Core Endpoints](#core-endpoints)
-4. [Data Models](#data-models)
-5. [UI Integration Guide](#ui-integration-guide)
-6. [System Logic & Error Handling](#system-logic--error-handling)
+4. [UI Integration Guide](#ui-integration-guide)
+5. [System Logic & Error Handling](#system-logic--error-handling)
 
 ---
 
@@ -45,20 +45,23 @@ setInterval(async () => {
 
 ## 🔄 Data Flow & Lifecycle
 
-The lifecycle now runs essentially two parallel engines (Buy Engine and Sell Engine).
+The lifecycle now includes a high-priority "Hedge Monitor" step.
 
 1.  **Waiting for Limit (Optional):**
-    - If `buy_limit_price > 0`, the server enters `buy_waiting_limit` state.
-    - Trades will not start until `Ask <= buy_limit_price`.
+    - If `buy_limit_price > 0`, trades will not start until `Ask <= buy_limit_price`.
 2.  **Grid Execution:**
-    - Once triggered (Market or Limit), the server locks the `start_ref` (Starting Reference Price).
-    - Grid levels are calculated relative to this specific reference.
-3.  **TP Hit (Independent):**
-    - If **Buy TP** is hit, only the Buy side enters "Closing Phase".
-    - The Sell side continues running uninterrupted.
-4.  **Closing Phase:**
-    - Server sets `buy_is_closing` (or `sell_is_closing`) to `True`.
-    - Waits for MT5 active trade count to drop to **0** for that specific specific side.
+    - Standard grid logic fills orders based on the `dollar` gap.
+3.  **Hedge Monitor (Priority High):**
+    - The system checks the floating profit of the Buy or Sell side.
+    - **Trigger:** If `Profit <= -1 * hedge_value` (e.g., Loss reaches $50):
+        - **Lock:** The losing side is locked (`hedge_triggered = True`). No new grids for this side.
+        - **Counter-Attack:** A trade is instantly fired on the **opposite** side.
+            - If opposite is OFF: It forces it ON and starts fresh.
+            - If opposite is ON: It appends a new row and executes immediately.
+4.  **TP Hit:**
+    - Take Profit logic runs independently for Buy and Sell.
+5.  **Closing Phase:**
+    - When TP is hit or manually stopped, the system waits for MT5 trades to reach 0 before resetting.
 
 ---
 
@@ -66,7 +69,7 @@ The lifecycle now runs essentially two parallel engines (Buy Engine and Sell Eng
 
 ### 1. GET `/api/ui-data`
 
-**Purpose:** Get complete system state including the new separate flags.  
+**Purpose:** Get complete system state including new Hedge flags.  
 **Frequency:** Poll every 1 second.
 
 **Response Example:**
@@ -74,91 +77,71 @@ The lifecycle now runs essentially two parallel engines (Buy Engine and Sell Eng
 ```json
 {
   "settings": {
-    "buy_limit_price": 1.0500,      // 0.0 = Market Execution
-    "sell_limit_price": 0.0,        // 0.0 = Market Execution
+    "buy_limit_price": 0.0,
     "buy_tp_type": "equity_pct",
     "buy_tp_value": 1.5,
+    "buy_hedge_value": 50.0,        // NEW: 0.0 = Disabled. >0 = Active ($)
+    
+    "sell_limit_price": 0.0,
     "sell_tp_type": "fixed_money",
     "sell_tp_value": 50.0,
+    "sell_hedge_value": 0.0,        // NEW
+    
     "rows_buy": [...],
     "rows_sell": [...]
   },
   "runtime": {
     "buy_on": true,
-    "sell_on": false,
+    "sell_on": true,
 
-    // --- NEW: Limit & Reference States ---
-    "buy_waiting_limit": true,      // UI: Show "Waiting for Price..."
+    // --- NEW: Hedge Flags ---
+    "buy_hedge_triggered": true,    // UI: Show "HEDGED / FROZEN" status
+    "sell_hedge_triggered": false,
+
+    // --- Limit & Reference States ---
+    "buy_waiting_limit": false,
     "sell_waiting_limit": false,
-    "buy_start_ref": 1.0500,        // The anchor price for the grid
-    "sell_start_ref": 0.0,
+    "buy_start_ref": 1.0500,
+    "sell_start_ref": 1.0550,
 
     // --- Closing States ---
     "buy_is_closing": false,
     "sell_is_closing": false,
 
-    "error_status": "",             // CRITICAL: If not empty, block UI
+    "error_status": "", 
     "buy_exec_map": { ... },
     "sell_exec_map": { ... }
   },
-  "market": {
-      "current": { "mid": 1.0520, "ts": 1700000000.0 },
-      "history": [...]
-  },
-  "last_update": "2025-12-20T20:30:15..."
+  "market": { ... },
+  "last_update": "..."
 }
 ```
 
 ---
 
-### 2. POST `/api/control`
+### 2. POST `/api/update-settings`
 
-**Purpose:** Master switches.
-**Note:** `emergency_close` kills **both** sides immediately.
-
-**Request:**
-
-```json
-{
-  "buy_switch": true,
-  "sell_switch": false,
-  "cyclic": true,
-  "emergency_close": false
-}
-```
-
----
-
-### 3. POST `/api/update-settings`
-
-**Purpose:** Update the split configuration and acknowledge alerts.
-**Important:** You must send the full structure (Buy settings AND Sell settings).
-
-> **🔒 Partial Locking Rule:**
-> If a row has already traded (exists in `exec_map`), the server ignores changes to `dollar` and `lots`, but accepts changes to `alert`.
+**Purpose:** Update configuration including Hedge values.
 
 **Request:**
 
 ```json
 {
   # --- Buy Settings ---
-  "buy_limit_price": 1.0500,    # Set to 0 for Market Execution
-  "buy_tp_type": "equity_pct",  # Options: "equity_pct", "balance_pct", "fixed_money"
-  "buy_tp_value": 1.0,          # Value corresponding to type
-
+  "buy_limit_price": 0.0,
+  "buy_tp_type": "equity_pct",
+  "buy_tp_value": 1.0,
+  "buy_hedge_value": 50.0,      # NEW: Input 50.0 to hedge at -$50.00 loss
+  
   # --- Sell Settings ---
-  "sell_limit_price": 0.0,      # 0 = Start immediately
+  "sell_limit_price": 0.0,
   "sell_tp_type": "fixed_money",
   "sell_tp_value": 100.0,
+  "sell_hedge_value": 0.0,      # NEW
 
   # --- Grid Rows ---
-  "rows_buy": [
-    { "index": 0, "dollar": 0.002, "lots": 0.01, "alert": false },
-    { "index": 1, "dollar": 0.003, "lots": 0.02, "alert": true }
-  ],
-  "rows_sell": [
-    { "index": 0, "dollar": 0.002, "lots": 0.01, "alert": false }
-  ]
+  "rows_buy": [...],
+  "rows_sell": [...]
 }
 ```
 
@@ -166,52 +149,62 @@ The lifecycle now runs essentially two parallel engines (Buy Engine and Sell Eng
 
 ## 🎨 UI Integration Guide
 
-### 1. Split Interface
+### 1. New Inputs
+Add a numeric input field to both the Buy and Sell panels:
+*   **Label:** "Hedge at Loss ($)"
+*   **Field:** `settings.buy_hedge_value` / `settings.sell_hedge_value`
+*   **Behavior:** User enters a positive number (e.g., 100). Send this to the server. Send `0` to disable.
 
-Your UI should visually separate the **Buy Control Panel** from the **Sell Control Panel**.
+### 2. Visualizing Hedge Status
+You need to show if a side has been "Hedged" (Frozen due to loss).
 
-- **Buy Panel:** Inputs for `buy_limit_price`, `buy_tp_type`, `buy_tp_value`, and the Buy Grid Table.
-- **Sell Panel:** Inputs for `sell_limit_price`, `sell_tp_type`, `sell_tp_value`, and the Sell Grid Table.
+**Logic:**
+```javascript
+if (runtime.buy_hedge_triggered) {
+  // Show RED border around Buy Panel
+  // Disable "Add Row" buttons for Buy side
+  // Show Badge: "🛑 HEDGE TRIGGERED"
+}
+```
+*   **Note:** When `buy_hedge_triggered` is true, the server will stop executing new Buy rows (standard grid). It effectively freezes that side until the user manually resets or the session closes.
 
-### 2. Status Indicators
-
-You need to visualize 3 distinct states per side based on `runtime`:
-
-| Runtime State                        | UI Status Text       | Color         |
-| :----------------------------------- | :------------------- | :------------ |
-| `buy_on=F`                           | **STOPPED**          | Gray          |
-| `buy_on=T` AND `buy_waiting_limit=T` | **WAITING LIMIT**    | Orange/Yellow |
-| `buy_on=T` AND `buy_waiting_limit=F` | **ACTIVE / TRADING** | Green         |
-| `buy_is_closing=T`                   | **CLOSING...**       | Blue/Spinner  |
-
-### 3. Acknowledging Alerts
-
-Same as previous versions:
-
-1.  If a trade executes with `alert: true`, UI plays sound.
-2.  User clicks "Stop Alarm".
-3.  UI sends `/api/update-settings` with that specific row's `alert` set to `false`.
+### 3. Hedge Trade Visualization
+When a hedge triggers, the server injects a new row into the **Opposite** grid.
+*   **Example:** Buy side loses $50 -> Server injects a row into **Sell** grid.
+*   **UI Effect:** You will see a new row appear in the Sell table automatically with `"alert": true`. The UI should handle this normally (play sound/show alert).
 
 ---
 
 ## ⚙️ System Logic & Error Handling
 
-### 1. Limit Price Logic (The "Trap")
+### 1. The Hedge Mechanism (v3.4.0) 🛡️
 
-- **Logic:** If you set `buy_limit_price = 1.0500` and current Ask is `1.0550`:
-  - The bot sets `buy_waiting_limit = True`.
-  - It **waits** until Ask drops to `<= 1.0500`.
-  - Once hit, `buy_waiting_limit` becomes `False`, and `buy_start_ref` is set to `1.0500` (or current Ask). The grid builds down from there.
-- **Reset:** If you stop the bot (`buy_on = False`), the limit waiting state is cleared.
+**A. Trigger Condition**
+The server sums the profit of all active trades for a specific Session ID.
+`if (Total Profit <= -1 * hedge_value)` -> **TRIGGER**.
 
-### 2. Conflict Detection 🛑
+**B. Action 1: Lock the Loser**
+The losing side (e.g., Buy) sets `buy_hedge_triggered = True`.
+*   This prevents any further grid levels from executing on the Buy side.
+*   The Buy side is now "Paused" waiting for the user or the hedge to resolve the equity.
 
-- The server explicitly checks `p.comment` against `rt.buy_id` and `rt.sell_id`.
-- If a trade appears with `buy_...` in the comment but doesn't match the current Session ID, the server throws a **CRITICAL ERROR** and freezes.
+**C. Action 2: Attack with the Winner**
+The system calculates the `Total Volume` of the losing side (e.g., 0.15 lots). It immediately executes a **Sell** trade of 0.15 lots.
 
-### 3. TP Calculation
+*   **Scenario A: Sell Side was OFF.**
+    *   Server turns Sell ON.
+    *   Clears old Sell rows.
+    *   Creates a single Row 0 with 0.15 lots.
+    *   Executes immediately.
+*   **Scenario B: Sell Side was ON.**
+    *   Server calculates the gap between the *last Sell trade* and *current Bid*.
+    *   Appends a new row with that specific dollar gap.
+    *   Executes immediately.
 
-- **Equity %:** `Current Equity * (Value / 100)`
-- **Balance %:** `Current Balance * (Value / 100)`
-- **Fixed Money:** Raw `Value`
-- _Note:_ TP is checked on every tick. If hit, it triggers the "Close Sequence" for that specific side only.
+### 2. Limit Price Logic (The "Trap")
+*   If `buy_limit_price > 0`, the bot waits. `buy_waiting_limit` = True.
+*   Once price hits, it executes and sets the `buy_start_ref`.
+
+### 3. Conflict Detection 🛑
+*   If the server sees a trade in MT5 with a `buy_HASH...` comment that matches a different hash than the current memory, it throws a **CRITICAL ERROR**.
+*   **UI Action:** Block the screen. User must close the "Alien" trade in MT5 or use "Emergency Close" in the app.

@@ -1,20 +1,22 @@
-# 📘 Quick Reference - API Field Mappings (v3.3.0)
+# 📘 Quick Reference - API Field Mappings (v3.4.0)
 
 ## 1. UserSettings Object
 **Endpoint:** `POST /api/update-settings`  
-**Correction:** The server now separates Buy and Sell settings (TPs and Limits). The TP type `amount` is actually `fixed_money` in the Python code.
+**Updates:** Added `hedge_value` fields for both sides.
 
 ```typescript
 interface UserSettings {
   // --- BUY SETTINGS ---
   buy_limit_price: number;       // 0 = Market Price, >0 = Pending Limit
   buy_tp_type: "equity_pct" | "balance_pct" | "fixed_money";
-  buy_tp_value: number;          // e.g. 1.5 (for 1.5%) or 50.0 (for $50)
+  buy_tp_value: number;          // e.g. 1.5 (%) or 50.0 ($)
+  buy_hedge_value: number;       // ⚠️ NEW: 0.0 = Off. Positive value (e.g., 50.0) = Hedge at -$50 loss
 
   // --- SELL SETTINGS ---
-  sell_limit_price: number;      // 0 = Market Price, >0 = Pending Limit
+  sell_limit_price: number;
   sell_tp_type: "equity_pct" | "balance_pct" | "fixed_money";
   sell_tp_value: number;
+  sell_hedge_value: number;      // ⚠️ NEW
 
   // --- GRIDS ---
   rows_buy: GridRow[];           // Array of GridRow objects
@@ -25,13 +27,13 @@ interface GridRow {
   index: number;
   dollar: number;                // Price gap
   lots: number;                  // Volume
-  alert: boolean;                // UI alert flag (User sets this)
+  alert: boolean;                // UI alert flag
 }
 ```
 
 ## 2. RuntimeState Object
 **Endpoint:** `GET /api/ui-data` (Inside the `runtime` key)  
-**Correction:** The server does **not** send `next_index` or `last_alert_msg`. You must calculate the next index based on the execution map length.
+**Updates:** Added `hedge_triggered` flags.
 
 ```typescript
 interface RuntimeState {
@@ -41,11 +43,15 @@ interface RuntimeState {
   cyclic_on: boolean;
 
   // --- STATES ---
-  buy_waiting_limit: boolean;    // True if waiting for price to hit limit
+  buy_waiting_limit: boolean;    // True if waiting for Limit Price
   sell_waiting_limit: boolean;
   
-  buy_is_closing: boolean;       // True if TP hit, waiting for trades to close
+  buy_is_closing: boolean;       // True if TP hit, cleaning up trades
   sell_is_closing: boolean;
+
+  // --- HEDGE STATES (NEW) ---
+  buy_hedge_triggered: boolean;  // ⚠️ True if Buy side hit max loss and is FROZEN
+  sell_hedge_triggered: boolean;
 
   // --- EXECUTION DATA ---
   // Maps index (as string) to stats. 
@@ -54,11 +60,11 @@ interface RuntimeState {
   sell_exec_map: Record<string, RowExecStats>; 
 
   // --- REFERENCE PRICES ---
-  buy_start_ref: number;         // The anchor price the grid is built on
+  buy_start_ref: number;         // Anchor price
   sell_start_ref: number;
 
   // --- ERRORS ---
-  error_status: string;          // If not empty string, BLOCK THE UI (Critical)
+  error_status: string;          // If not empty, BLOCK THE UI (Critical)
 }
 
 interface RowExecStats {
@@ -71,8 +77,7 @@ interface RowExecStats {
 ```
 
 ## 3. Control Commands
-**Endpoint:** `POST /api/control`  
-**Correction:** The emergency command is `emergency_close`, not `close_all`.
+**Endpoint:** `POST /api/control`
 
 ```typescript
 // Toggle BUY
@@ -97,33 +102,27 @@ interface RowExecStats {
 | FIXED $ | `"fixed_money"` | Specific Currency Amount |
 | *OFF* | *N/A* | Send `value: 0` to disable TP |
 
-## 5. UI Logic: Highlighting & Alerts
-
-Since the server doesn't send "Next Index" or "Alert Messages" explicitly, the Frontend must derive them:
+## 5. UI Logic: States & Visuals
 
 ### A. Calculating "Next Row" (Blue Highlight)
-The "next" row to be executed is simply the count of currently executed rows.
+The "next" row to be executed is the count of currently executed rows.
 ```typescript
 const buyNextIndex = Object.keys(runtime.buy_exec_map).length;
 const sellNextIndex = Object.keys(runtime.sell_exec_map).length;
-
-// Logic:
-// If buyNextIndex is 0 -> Highlight Row 0
-// If buyNextIndex is 5 -> Highlight Row 5
 ```
 
 ### B. Triggering Alerts (Red Highlight / Sound)
-You need to cross-reference the **Executed Rows** with the **Settings**.
-
-**Logic:**
-Iterate through `runtime.buy_exec_map`. For every executed index:
-1.  Look up the corresponding row in `settings.rows_buy`.
-2.  If `row.alert === true`:
-    *   **UI:** Play Sound.
-    *   **UI:** Show "Acknowledge" button.
-    *   **Action:** When user clicks Acknowledge, update settings sending `alert: false` for that row.
+Iterate through executed rows in `runtime`. If `settings.rows[index].alert === true`:
+*   **UI:** Play Sound & Show "Acknowledge" button.
+*   **Action:** Clicking Acknowledge sends `{ alert: false }` for that row via `update-settings`.
 
 ### C. Waiting for Limit (Yellow Status)
 If `runtime.buy_waiting_limit === true`:
-*   **UI:** Overlay the Buy Grid with text: *"Waiting for Price < [limit_price]..."*
-*   **Input:** Allow user to change `buy_limit_price` on the fly.
+*   **Status:** "⏳ Waiting for Price < [limit_price]"
+*   **Input:** Allow user to adjust Limit Price.
+
+### D. Hedge Triggered (Frozen/Red Status) ⚠️ NEW
+If `runtime.buy_hedge_triggered === true`:
+*   **Status:** "🛑 HEDGE TRIGGERED / FROZEN"
+*   **Visual:** Red border around the Buy panel.
+*   **Interaction:** Disable the "Add Row" or "Start" buttons for this side. It is locked until the session ends or is reset.
