@@ -1,20 +1,20 @@
 //+------------------------------------------------------------------+
 //|                                                TradingClient.mq5 |
-//|                                  Grid Trading System Client v2.1 |
-//|                          Production-Ready MT5 Client - Hash IDs  |
+//|                                    Elastic DCA Trading Client v3 |
+//|                           Execution Bridge for Elastic DCA Engine|
 //+------------------------------------------------------------------+
-#property copyright "Grid Trading System"
-#property link      "https://www.gridtrading.com"
-#property version   "2.10"
+#property copyright "Elastic DCA System"
+#property link      "https://github.com/Adikumaw/elastic-dca-trader"
+#property version   "3.4.2"
 #property strict
 
 //--- Input Parameters ---
-//input string InpServerURL = "http://127.0.0.1:8000";  // Server URL
+//input string InpServerURL   = "http://127.0.0.1:8000"; for dev
 input string InpServerURL = "http://YOUR_SERVER_IP:8000";  // Server URL
-input int    InpTimeout   = 5000;                     // Request timeout (ms)
-input int    InpMagicNumber = 789456;                 // Magic number for trades
-input int    InpSlippage = 10;                        // Slippage in points
-input bool   InpDebugMode = true;                     // Enable debug logging
+input int    InpTimeout     = 5000;                    // Request timeout (ms)
+input int    InpMagicNumber = 789456;                  // Magic number for trades
+input int    InpSlippage    = 10;                      // Slippage in points
+input bool   InpDebugMode   = true;                    // Enable debug logging
 
 //--- Global Variables ---
 string g_BrokerName = "";
@@ -36,16 +36,17 @@ int OnInit()
    g_Symbol = _Symbol;
    g_Digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    
-   // Set timer for 1-second polling
+   // Set timer for 1-second polling (Heartbeat)
    EventSetTimer(1);
    
    Print("==================================================");
-   Print("Grid Trading Client v2.1 Initialized");
+   Print("Elastic DCA Client v3.4.2 Initialized");
+   Print("Status: Waiting for Server Command...");
    Print("==================================================");
    Print("Broker: ", g_BrokerName);
    Print("Account: ", g_AccountID);
    Print("Symbol: ", g_Symbol);
-   Print("Server: ", InpServerURL);
+   Print("Engine: ", InpServerURL);
    Print("==================================================");
    Print("IMPORTANT: Ensure server URL is whitelisted in:");
    Print("Tools -> Options -> Expert Advisors -> Allow WebRequest");
@@ -75,7 +76,7 @@ void OnDeinit(const int reason)
    }
    
    Print("==================================================");
-   Print("Grid Trading Client Stopped: ", reasonText);
+   Print("Elastic DCA Client Stopped: ", reasonText);
    Print("==================================================");
 }
 
@@ -84,7 +85,7 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTimer()
 {
-   // Prevent excessive polling
+   // Prevent excessive polling within the same second
    datetime currentTime = TimeCurrent();
    if(currentTime == g_LastTickTime)
       return;
@@ -143,7 +144,7 @@ string BuildTickPayload()
       {
          string symbol = PositionGetString(POSITION_SYMBOL);
          
-         // Include all positions (server will filter by comment)
+         // Include all positions (server will filter by comment hash)
          if(added > 0) json += ",";
          
          json += "{";
@@ -183,10 +184,10 @@ void SendTickToServer(string jsonPayload)
    string headers = "Content-Type: application/json\r\n";
    string resultHeaders;
    
-   // FIXED: Proper conversion without null terminator
+   // Proper conversion to UTF8 array
    int len = StringToCharArray(jsonPayload, data, 0, WHOLE_ARRAY, CP_UTF8);
    
-   // Remove null terminator that MQL5 automatically adds
+   // Remove null terminator
    if(len > 0)
       ArrayResize(data, len - 1);
    
@@ -206,7 +207,7 @@ void SendTickToServer(string jsonPayload)
    }
    else if(statusCode == 204)
    {
-      // No content - heartbeat OK
+      // No content - heartbeat OK (Waiting state)
       g_ConsecutiveErrors = 0;
       g_ServerReachable = true;
    }
@@ -225,19 +226,20 @@ void SendTickToServer(string jsonPayload)
       }
       else
       {
-         if(g_ConsecutiveErrors % 10 == 1) // Log every 10th error
+         // Only log sporadic errors to avoid spamming journal
+         if(g_ConsecutiveErrors % 20 == 1) 
          {
-            Print("[ERROR] WebRequest failed. Code: ", error, " (", g_ConsecutiveErrors, " consecutive)");
+            Print("[CONN] Connection failed. Code: ", error, " (", g_ConsecutiveErrors, " retries)");
          }
       }
    }
    else
    {
-      // Server error
+      // Server error (500, 404, etc)
       g_ConsecutiveErrors++;
       if(g_ConsecutiveErrors % 10 == 1)
       {
-         Print("[ERROR] Server returned status: ", statusCode, " (", g_ConsecutiveErrors, " consecutive)");
+         Print("[SERVER ERROR] Status: ", statusCode);
       }
    }
 }
@@ -261,7 +263,7 @@ void ProcessServerResponse(string response)
       Print("[SERVER] Action: ", action);
    }
    
-   // Handle CLOSE_ALL
+   // Handle CLOSE_ALL (Snap-Back or Panic)
    if(action == "CLOSE_ALL")
    {
       string comment = ExtractJsonValue(response, "comment");
@@ -273,7 +275,7 @@ void ProcessServerResponse(string response)
       }
       
       // Check for special keywords
-      if(comment == "server" || comment == "EMERGENCY")
+      if(comment == "server" || comment == "EMERGENCY" || comment == "CLOSE_ALL_EMERGENCY")
       {
          Print("[ACTION] EMERGENCY CLOSE ALL POSITIONS");
          CloseAllPositions();
@@ -288,7 +290,7 @@ void ProcessServerResponse(string response)
       return;
    }
    
-   // Handle BUY
+   // Handle BUY (Elastic Expansion)
    if(action == "BUY")
    {
       string sVolume = ExtractJsonValue(response, "volume");
@@ -312,7 +314,7 @@ void ProcessServerResponse(string response)
       return;
    }
    
-   // Handle SELL
+   // Handle SELL (Elastic Expansion)
    if(action == "SELL")
    {
       string sVolume = ExtractJsonValue(response, "volume");
@@ -340,7 +342,7 @@ void ProcessServerResponse(string response)
 }
 
 //+------------------------------------------------------------------+
-//| Extract value from JSON string (simple parser)                   |
+//| Extract value from JSON string (Simple Parser)                   |
 //+------------------------------------------------------------------+
 string ExtractJsonValue(string json, string key)
 {
@@ -530,7 +532,7 @@ void ExecuteSellOrder(double lots, string comment)
 }
 
 //+------------------------------------------------------------------+
-//| Close all positions                                              |
+//| Close all positions (EMERGENCY)                                      |
 //+------------------------------------------------------------------+
 void CloseAllPositions()
 {
@@ -540,15 +542,9 @@ void CloseAllPositions()
    for(int i = total - 1; i >= 0; i--)
    {
       ulong ticket = PositionGetTicket(i);
-      
       if(ticket > 0 && PositionSelectByTicket(ticket))
       {
-         string symbol = PositionGetString(POSITION_SYMBOL);
-         
-         if(ClosePosition(ticket))
-         {
-            closed++;
-         }
+         if(ClosePosition(ticket)) closed++;
       }
    }
    
@@ -556,7 +552,7 @@ void CloseAllPositions()
 }
 
 //+------------------------------------------------------------------+
-//| Close positions by comment filter                                |
+//| Close positions by Hash ID (Snap-Back)                           |
 //+------------------------------------------------------------------+
 void ClosePositionsByComment(string commentFilter)
 {
@@ -576,10 +572,7 @@ void ClosePositionsByComment(string commentFilter)
          if(StringFind(comment, commentFilter) != -1)
          {
             matched++;
-            if(ClosePosition(ticket))
-            {
-               closed++;
-            }
+            if(ClosePosition(ticket)) closed++;
          }
       }
    }
@@ -647,7 +640,7 @@ bool ClosePosition(ulong ticket)
 //+------------------------------------------------------------------+
 ENUM_ORDER_TYPE_FILLING GetOrderFillingType()
 {
-   // Check broker-specific requirements
+   // Specific logic for Prop Firms / ECN Brokers
    if(StringFind(g_BrokerName, "XM") != -1 ||
       StringFind(g_BrokerName, "Raw Trading") != -1 ||
       StringFind(g_BrokerName, "Royal ETP") != -1 ||
@@ -657,17 +650,12 @@ ENUM_ORDER_TYPE_FILLING GetOrderFillingType()
       return ORDER_FILLING_IOC;
    }
    
-   // Check symbol filling modes
+   // Fallback to Symbol settings
    int fillingMode = (int)SymbolInfoInteger(g_Symbol, SYMBOL_FILLING_MODE);
    
-   if((fillingMode & SYMBOL_FILLING_FOK) == SYMBOL_FILLING_FOK)
-      return ORDER_FILLING_FOK;
+   if((fillingMode & SYMBOL_FILLING_FOK) == SYMBOL_FILLING_FOK) return ORDER_FILLING_FOK;
+   if((fillingMode & SYMBOL_FILLING_IOC) == SYMBOL_FILLING_IOC) return ORDER_FILLING_IOC;
    
-   if((fillingMode & SYMBOL_FILLING_IOC) == SYMBOL_FILLING_IOC)
-      return ORDER_FILLING_IOC;
-   
-   // Default
    return ORDER_FILLING_RETURN;
 }
-
 //+------------------------------------------------------------------+
