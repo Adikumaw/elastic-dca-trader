@@ -40,21 +40,21 @@ The **Elastic DCA (Dollar Cost Averaging)** system is an advanced automation too
 
 ---
 
-## 🏗️ System Architecture
+## 📂 Project Structure
 
-This project uses a hybrid architecture to combine the execution speed of MetaTrader with the calculation power of Python and the usability of React.
+The system follows a monorepo-style architecture separating logic, interface, and infrastructure.
 
-```mermaid
-graph LR
-    A[MetaTrader 5] -- Tick Data (1s Poll) --> B(Python Server)
-    B -- Trade Commands --> A
-    B -- WebSocket/API --> C[React Dashboard]
-    C -- User Settings --> B
+```text
+elastic-dca-system/
+├── apps/
+│   ├── server/          # Python FastAPI State Engine
+│   └── web/             # React/Vite Control Dashboard
+├── scripts/
+│   └── automation.mt5   # MQL5 Client Bridge
+├── docs/                # Technical API & Deployment Guides
+├── infra/               # AWS Setup & SSH Keys
+└── images/              # Assets
 ```
-
-- **Server:** Python 3.9+ / FastAPI / Uvicorn (State Engine)
-- **Client:** MQL5 Script (Execution Bridge)
-- **Interface:** React / TypeScript / TailwindCSS (Control Panel)
 
 ---
 
@@ -71,16 +71,13 @@ graph LR
 The server acts as the brain. It must be running before the MT5 script.
 
 ```bash
-# Clone the repository
-git clone https://github.com/your-username/elastic-dca-trader.git
+# 1. Navigate to the server application
+cd apps/server
 
-# Navigate to server
-cd server
-
-# Install dependencies
+# 2. Install Python dependencies
 pip install -r requirements.txt
 
-# Start the engine
+# 3. Start the engine
 python main.py
 ```
 
@@ -91,13 +88,13 @@ _The server will start on `http://0.0.0.0:8000`._
 Launch the visual control panel.
 
 ```bash
-# Navigate to web interface
-cd web
+# 1. Open a new terminal and navigate to the web application
+cd apps/web
 
-# Install dependencies
+# 2. Install Node dependencies
 npm install
 
-# Start the UI
+# 3. Start the UI
 npm run dev
 ```
 
@@ -109,8 +106,9 @@ _Access the dashboard at `http://localhost:3000`._
 2.  Go to **Tools -> Options -> Expert Advisors**.
 3.  Check **"Allow WebRequest for listed URL"**.
 4.  Add your server URL: `http://127.0.0.1:8000` (or your VPS IP).
-5.  Copy the `TradingClient.mq5` file to your MT5 Data Folder: `MQL5/Experts/`.
-6.  Drag the script onto the chart of the symbol you wish to trade (e.g., XAUUSD).
+5.  Locate the script in this repo at: `scripts/automation.mt5`.
+6.  Copy `automation.mt5` to your MT5 Data Folder: `MQL5/Experts/`.
+7.  Drag the script onto the chart of the symbol you wish to trade (e.g., XAUUSD).
 
 ---
 
@@ -136,6 +134,15 @@ Set your exit and safety parameters:
 - **Manual Start:** Toggle "Buy System" or "Sell System" ON. The system will place the first trade immediately (Index 0) or wait for a Limit Price if configured.
 - **Monitor:** Watch the "Active Levels" on the dashboard. As the market moves, the system will fill the defined rows.
 - **Completion:** Once the Basket TP is hit, the system closes all trades, resets the logic, and (if Cyclic mode is ON) starts a fresh session.
+
+---
+
+## 📚 Documentation
+
+For developers looking to extend the functionality:
+
+- **API Reference:** See [docs/api/api_technical_reference.md](docs/api/api_technical_reference.md) for JSON payloads and endpoints.
+- **Deployment:** See [infra/aws/aws_setup.md](infra/aws/aws_setup.md) for running this on the cloud.
 
 ---
 

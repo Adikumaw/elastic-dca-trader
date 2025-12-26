@@ -1,3 +1,5 @@
+# ☁️ AWS Amazon Linux: Production Setup Guide
+
 Since you are on **Amazon Linux** and want the **production** setup (built frontend files instead of development mode), here is the exact sequence of commands.
 
 This guide assumes you are already logged into your EC2 terminal.
@@ -24,14 +26,16 @@ node -v
 python3 --version
 ```
 
+---
+
 ### Step 2: Clone Your Repository
 
 ```bash
 cd ~
-git clone https://github.com/Adikumaw/trend-reversal-automation-bot.git
+git clone https://github.com/Adikumaw/elastic-dca-trader.git
 
-# Enter the repository folder (Change 'repo_name' to your actual folder name)
-cd trend-reversal-automation-bot
+# Enter the repository folder
+cd elastic-dca-trader
 ```
 
 ---
@@ -40,19 +44,23 @@ cd trend-reversal-automation-bot
 
 We will use a virtual environment and run the server using `screen` so it stays alive when you disconnect.
 
-1.  **Navigate to your python folder:**
+1.  **Navigate to the server folder:**
 
     ```bash
-    cd python
+    cd apps/server
     ```
 
 2.  **Install Dependencies:**
 
     ```bash
+    # Create virtual environment
     python3 -m venv venv
+    
+    # Activate it
     source venv/bin/activate
-    pip install fastapi uvicorn
-    # If you have a requirements.txt, run: pip install -r requirements.txt
+    
+    # Install requirements
+    pip install -r requirements.txt
     ```
 
 3.  **Start the Backend in Background:**
@@ -61,11 +69,11 @@ We will use a virtual environment and run the server using `screen` so it stays 
     # Create a screen session named "backend"
     screen -S backend
 
-    # Run the server (Port 8000 is defined in your main.py)
+    # Run the engine
     python3 main.py
     ```
 
-    _(You should see "Uvicorn running on http://0.0.0.0:8000")_
+    _(You should see "Elastic DCA Engine v3.4.2" and "Uvicorn running on http://0.0.0.0:8000")_
 
 4.  **Detach:** Press **`CTRL + A`**, then **`D`**.
     _(The backend is now running safely in the background)._
@@ -76,10 +84,11 @@ We will use a virtual environment and run the server using `screen` so it stays 
 
 For production, we will **build** the optimized files and serve them using a lightweight static server.
 
-1.  **Navigate to your frontend folder:**
+1.  **Navigate to the web folder:**
 
     ```bash
-    cd ..
+    # Go up from server, then into web
+    cd ../web
     ```
 
 2.  **Install Dependencies:**
@@ -89,22 +98,20 @@ For production, we will **build** the optimized files and serve them using a lig
     ```
 
 3.  **Verify API URL (Crucial):**
-    Since you cloned the repo, ensure `api.ts` has your **Elastic IP**.
+    Since you cloned the repo, ensure your API service file points to your **AWS Public IP** (Elastic IP), not localhost.
 
     ```bash
-    # Check the file content
-    cat src/api.ts
+    # Edit the API service file
+    nano src/services/api.ts
     ```
 
-    _If it doesn't show `YOUR_SERVER_IP`, edit it now:_
-
-    ```bash
-    nano src/api.ts
-    # Change URL to "http://YOUR_SERVER_IP:8000", Save (Ctrl+O, Enter), Exit (Ctrl+X)
-    ```
+    _Look for `const API_BASE_URL`. Change it to:_
+    `const API_BASE_URL = "http://YOUR_AWS_IP:8000";`
+    
+    _Save: Press `Ctrl+O`, `Enter`. Exit: Press `Ctrl+X`._
 
 4.  **Build for Production:**
-    This compiles your TypeScript into optimized HTML/CSS/JS.
+    This compiles your React/TypeScript into optimized HTML/CSS/JS.
 
     ```bash
     npm run build
@@ -135,7 +142,7 @@ For production, we will **build** the optimized files and serve them using a lig
 Everything is now running.
 
 1.  Open your browser.
-2.  Go to: **`http://YOUR_SERVER_IP:3000`**
+2.  Go to: **`http://YOUR_AWS_IP:3000`**
 
 ### Summary of Commands to Manage the App
 
