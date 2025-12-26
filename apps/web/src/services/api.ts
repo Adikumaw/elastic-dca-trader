@@ -1,6 +1,6 @@
 import { AppData, UserSettings } from "../types";
 
-const API_BASE_URL = "http://75.101.175.60:8000";
+const API_BASE_URL = "http://YOUR_SERVER_IP:8000";
 
 export const fetchUiData = async (): Promise<AppData | null> => {
   // Use AbortController to enforce a strict timeout
