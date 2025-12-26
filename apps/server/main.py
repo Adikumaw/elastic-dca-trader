@@ -1,7 +1,10 @@
 """
-High-Frequency Grid Trading System - Production Server
-VERSION: 3.4.2 - PROPER EXTERNAL CLOSE FIX
-Stack: Python 3.9+, FastAPI, Uvicorn
+Elastic DCA Trading System - Production Server
+----------------------------------------------
+Strategy: Counter-Trend Grid (Mean Reversion)
+Features: Elastic Grid Expansion, Basket TP, IronClad Hedge Lock
+Stack:    Python 3.9+, FastAPI, Uvicorn
+Version:  3.4.2
 """
 
 import json
@@ -22,7 +25,7 @@ from pydantic import BaseModel, Field
 # --- Configuration ---
 STATE_FILE = "state.json"
 PRICE_HISTORY_LEN = 100
-# Regex to identify trades managed by this system format: "buy_HASH_idx0"
+# Regex to identify trades managed by this system. Format: "buy_HASH_idx0"
 TRADE_ID_PATTERN = re.compile(r"^(sell|buy)_[0-9a-fA-F]{8}_idx\d+$")
 # Grace period: Wait for broker to acknowledge trades before checking external close
 EXTERNAL_CLOSE_GRACE_PERIOD = 5.0  # seconds
@@ -31,8 +34,8 @@ EXTERNAL_CLOSE_GRACE_PERIOD = 5.0  # seconds
 
 class GridRow(BaseModel):
     index: int
-    dollar: float
-    lots: float
+    dollar: float  # Gap distance in price
+    lots: float    # Volume for this strata
     alert: bool = False
 
 class Position(BaseModel):
@@ -67,6 +70,7 @@ class RuntimeState(BaseModel):
     sell_on: bool = False
     cyclic_on: bool = False
     
+    # Session Hash IDs (The "Vector")
     buy_id: str = ""
     sell_id: str = ""
     
@@ -74,7 +78,7 @@ class RuntimeState(BaseModel):
     buy_is_closing: bool = False
     sell_is_closing: bool = False
     
-    # Hedge Trigger Flags
+    # Hedge Trigger Flags (IronClad Protocol)
     buy_hedge_triggered: bool = False
     sell_hedge_triggered: bool = False
     
@@ -82,7 +86,7 @@ class RuntimeState(BaseModel):
     buy_waiting_limit: bool = False
     sell_waiting_limit: bool = False
     
-    # Separate Start References
+    # Separate Start References (The Anchor Price)
     buy_start_ref: float = 0.0
     sell_start_ref: float = 0.0
     
@@ -103,20 +107,21 @@ class RuntimeState(BaseModel):
     sell_last_order_sent_ts: float = 0.0
 
 class UserSettings(BaseModel):
-    # Separate Limit Prices
+    # Anchor Settings
     buy_limit_price: float = 0.0
     sell_limit_price: float = 0.0
     
-    # Separate Take Profit Settings
+    # Basket Take Profit Settings (The Snap-Back)
     buy_tp_type: str = "equity_pct"
     buy_tp_value: float = 0.0
     sell_tp_type: str = "equity_pct"
     sell_tp_value: float = 0.0
     
-    # Loss Hedge Settings
+    # Hedge Settings (The Lock)
     buy_hedge_value: float = 0.0
     sell_hedge_value: float = 0.0
     
+    # The Grid Strata
     rows_buy: List[GridRow] = []
     rows_sell: List[GridRow] = []
 
@@ -138,7 +143,7 @@ def save_state():
         with open(STATE_FILE, "w") as f:
             json.dump(state_dict, f, indent=2)
     except Exception as e:
-        print(f"[ERROR] Save: {e}")
+        print(f"[ERROR] Save State Failed: {e}")
 
 def load_state():
     global state, price_history
@@ -150,18 +155,20 @@ def load_state():
                 hist = data.pop('price_history')
                 price_history = deque(hist, maxlen=PRICE_HISTORY_LEN)
             state = SystemState(**data)
-            print(f"[INIT] Loaded - Buy:{state.runtime.buy_on} Sell:{state.runtime.sell_on}")
+            print(f"[INIT] State Restored - Buy:{state.runtime.buy_on} Sell:{state.runtime.sell_on}")
         except Exception as e:
-            print(f"[ERROR] Load: {e}")
+            print(f"[ERROR] Load State Failed: {e}")
     else:
-        print("[INIT] Fresh start")
+        print("[INIT] No previous state found. Starting fresh.")
 
 # --- Core Logic ---
 
 def get_hash(side: str) -> str:
+    """Generate a unique session ID for the vector."""
     return f"{side}_{uuid.uuid4().hex[:8]}"
 
 def calculate_grid_level_price(side: str, level_index: int) -> float:
+    """Calculate the target price for a specific grid strata."""
     rt = state.runtime
     st = state.settings
     
@@ -179,6 +186,7 @@ def calculate_grid_level_price(side: str, level_index: int) -> float:
         return ref
 
 def update_exec_stats(tick: TickData):
+    """Update internal execution map based on broker positions."""
     rt = state.runtime
     
     # Start with a copy to preserve history of closed trades during the session
@@ -189,15 +197,15 @@ def update_exec_stats(tick: TickData):
         if not TRADE_ID_PATTERN.match(p.comment):
             continue 
 
-        # Check for Conflict
+        # Check for Session Conflict
         if "buy_" in p.comment:
             if not rt.buy_id or rt.buy_id not in p.comment:
-                rt.error_status = f"CRITICAL: Conflict detected. Unknown Buy trade {p.ticket}."
+                rt.error_status = f"CRITICAL: Identity Conflict. Unknown Buy trade {p.ticket} detected."
                 return
 
         if "sell_" in p.comment:
             if not rt.sell_id or rt.sell_id not in p.comment:
-                rt.error_status = f"CRITICAL: Conflict detected. Unknown Sell trade {p.ticket}."
+                rt.error_status = f"CRITICAL: Identity Conflict. Unknown Sell trade {p.ticket} detected."
                 return
 
         try:
@@ -221,7 +229,7 @@ def update_exec_stats(tick: TickData):
         except Exception:
             pass
 
-    # Calculate cumulatives
+    # Calculate cumulatives (Basket Stats)
     for map_dict in [buy_map, sell_map]:
         indices = sorted([int(k) for k in map_dict.keys()])
         cum_lots, cum_profit = 0.0, 0.0
@@ -236,7 +244,7 @@ def update_exec_stats(tick: TickData):
     rt.sell_exec_map = sell_map
 
 def check_tp_buy(tick: TickData) -> int:
-    """Check if BUY side take profit is hit"""
+    """Check if BUY side 'Snap-Back' profit target is reached."""
     st = state.settings
     rt = state.runtime
     
@@ -259,13 +267,13 @@ def check_tp_buy(tick: TickData) -> int:
         target = st.buy_tp_value
     
     if target > 0 and profit >= target:
-        print(f"[BUY TP HIT] ${profit:.2f} >= ${target:.2f}")
+        print(f"[ELASTIC SNAP-BACK] Buy Basket Profit: ${profit:.2f} >= Target: ${target:.2f}")
         return 1
         
     return 0
 
 def check_tp_sell(tick: TickData) -> int:
-    """Check if SELL side take profit is hit"""
+    """Check if SELL side 'Snap-Back' profit target is reached."""
     st = state.settings
     rt = state.runtime
     
@@ -288,20 +296,17 @@ def check_tp_sell(tick: TickData) -> int:
         target = st.sell_tp_value
     
     if target > 0 and profit >= target:
-        print(f"[SELL TP HIT] ${profit:.2f} >= ${target:.2f}")
+        print(f"[ELASTIC SNAP-BACK] Sell Basket Profit: ${profit:.2f} >= Target: ${target:.2f}")
         return 1
         
     return 0
-
-def has_active_trades(tick: TickData, hash_id: str) -> bool:
-    return hash_id and any(hash_id in p.comment for p in tick.positions)
 
 def count_active_trades(tick: TickData, hash_id: str) -> int:
     if not hash_id: return 0
     return sum(1 for p in tick.positions if hash_id in p.comment)
 
 def get_last_executed_price(side: str) -> float:
-    """Get the price of the last executed level"""
+    """Get the price of the last executed strata."""
     rt = state.runtime
     
     if side == "buy":
@@ -319,7 +324,7 @@ def get_last_executed_price(side: str) -> float:
 
 # --- FastAPI App ---
 
-app = FastAPI(title="Grid Trading Server", version="3.4.2")
+app = FastAPI(title="Elastic DCA Engine", version="3.4.2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -341,14 +346,14 @@ async def validation_handler(request: Request, exc: RequestValidationError):
 @app.on_event("startup")
 async def startup():
     print("=" * 60)
-    print("Grid Trading Server v3.4.2 - PROPER FIX")
-    print("External Close Detection Improved")
+    print("Elastic DCA Engine v3.4.2")
+    print("Status: ONLINE | IronClad Protection: READY")
     print("=" * 60)
     load_state()
 
 @app.get("/")
 async def root():
-    return {"status": "running", "version": "3.4.2"}
+    return {"status": "running", "system": "Elastic DCA Engine", "version": "3.4.2"}
 
 @app.post("/api/tick")
 async def handle_tick(request: Request):
@@ -374,7 +379,7 @@ async def handle_tick(request: Request):
         
         # Conflict Block
         if rt.error_status:
-            print(f"[BLOCKED] Server frozen: {rt.error_status}")
+            print(f"[BLOCKED] Engine Locked: {rt.error_status}")
             return {"action": "WAIT", "error": rt.error_status}
 
         # Market Data Update
@@ -394,7 +399,7 @@ async def handle_tick(request: Request):
         if rt.error_status:
              return {"action": "WAIT", "error": rt.error_status}
 
-        # Priority 1: Pending Actions
+        # Priority 1: Pending Actions (Manual Overrides)
         if rt.pending_actions:
             action = rt.pending_actions.pop(0)
             save_state()
@@ -409,7 +414,7 @@ async def handle_tick(request: Request):
         if rt.buy_is_closing:
             count = count_active_trades(tick, rt.buy_id)
             if count == 0:
-                print(f"[CONFIRMED] All Buy trades closed. Resetting Session.")
+                print(f"[CONFIRMED] Buy Vector Closed. Resetting Session.")
                 rt.buy_is_closing = False
                 rt.buy_exec_map = {}
                 rt.buy_hedge_triggered = False
@@ -430,7 +435,7 @@ async def handle_tick(request: Request):
         if rt.sell_is_closing:
             count = count_active_trades(tick, rt.sell_id)
             if count == 0:
-                print(f"[CONFIRMED] All Sell trades closed. Resetting Session.")
+                print(f"[CONFIRMED] Sell Vector Closed. Resetting Session.")
                 rt.sell_is_closing = False
                 rt.sell_exec_map = {}
                 rt.sell_hedge_triggered = False
@@ -447,7 +452,7 @@ async def handle_tick(request: Request):
             else:
                 return {"action": "CLOSE_ALL", "comment": rt.sell_id}
 
-        # --- PRIORITY 1.8: HEDGE MONITOR ---
+        # --- PRIORITY 1.8: HEDGE MONITOR (IronClad Protocol) ---
         
         # BUY SIDE HEDGE CHECK
         if (rt.buy_on and rt.buy_id and not rt.buy_hedge_triggered and 
@@ -459,20 +464,20 @@ async def handle_tick(request: Request):
                 loss_threshold = -1 * st.buy_hedge_value
                 
                 if total_buy_profit <= loss_threshold:
-                    print(f"[BUY HEDGE TRIGGERED] Loss: ${total_buy_profit:.2f} <= ${loss_threshold:.2f}")
+                    print(f"[IRONCLAD ALERT] Buy Drawdown: ${total_buy_profit:.2f} <= Limit: ${loss_threshold:.2f}")
                     
                     # Lock the losing side
                     rt.buy_hedge_triggered = True
                     
                     # Calculate total hedge volume
                     hedge_lots = sum(p.volume for p in buy_positions)
-                    print(f"[HEDGE] Calculated hedge volume: {hedge_lots} lots")
+                    print(f"[HEDGE] Deploying Counter-Measure: {hedge_lots} lots SELL")
                     
                     # Check if opposite side is ready (not closing)
                     if not rt.sell_is_closing:
                         # Scenario A: Sell Side is OFF or Empty
                         if not rt.sell_on or not rt.sell_id or len(rt.sell_exec_map) == 0:
-                            print(f"[HEDGE] Starting new SELL session with {hedge_lots} lots")
+                            print(f"[HEDGE] Initializing Emergency Sell Session")
                             
                             # Force start Sell Session
                             rt.sell_id = get_hash("sell")
@@ -494,7 +499,7 @@ async def handle_tick(request: Request):
                                 profit=0,
                                 timestamp=datetime.now().isoformat()
                             )
-                            rt.sell_last_order_sent_ts = now_ts  # Mark timestamp
+                            rt.sell_last_order_sent_ts = now_ts
                             save_state()
                             
                             return {
@@ -506,7 +511,7 @@ async def handle_tick(request: Request):
                         
                         # Scenario B: Sell Side is Already Running
                         else:
-                            print(f"[HEDGE] Appending {hedge_lots} lots to existing SELL session")
+                            print(f"[HEDGE] Augmenting Existing Sell Session")
                             
                             # Get last executed index
                             indices = sorted([int(k) for k in rt.sell_exec_map.keys()])
@@ -533,7 +538,7 @@ async def handle_tick(request: Request):
                                 profit=0,
                                 timestamp=datetime.now().isoformat()
                             )
-                            rt.sell_last_order_sent_ts = now_ts  # Mark timestamp
+                            rt.sell_last_order_sent_ts = now_ts
                             save_state()
                             
                             return {
@@ -553,20 +558,20 @@ async def handle_tick(request: Request):
                 loss_threshold = -1 * st.sell_hedge_value
                 
                 if total_sell_profit <= loss_threshold:
-                    print(f"[SELL HEDGE TRIGGERED] Loss: ${total_sell_profit:.2f} <= ${loss_threshold:.2f}")
+                    print(f"[IRONCLAD ALERT] Sell Drawdown: ${total_sell_profit:.2f} <= Limit: ${loss_threshold:.2f}")
                     
                     # Lock the losing side
                     rt.sell_hedge_triggered = True
                     
                     # Calculate total hedge volume
                     hedge_lots = sum(p.volume for p in sell_positions)
-                    print(f"[HEDGE] Calculated hedge volume: {hedge_lots} lots")
+                    print(f"[HEDGE] Deploying Counter-Measure: {hedge_lots} lots BUY")
                     
                     # Check if opposite side is ready (not closing)
                     if not rt.buy_is_closing:
                         # Scenario A: Buy Side is OFF or Empty
                         if not rt.buy_on or not rt.buy_id or len(rt.buy_exec_map) == 0:
-                            print(f"[HEDGE] Starting new BUY session with {hedge_lots} lots")
+                            print(f"[HEDGE] Initializing Emergency Buy Session")
                             
                             # Force start Buy Session
                             rt.buy_id = get_hash("buy")
@@ -588,7 +593,7 @@ async def handle_tick(request: Request):
                                 profit=0,
                                 timestamp=datetime.now().isoformat()
                             )
-                            rt.buy_last_order_sent_ts = now_ts  # Mark timestamp
+                            rt.buy_last_order_sent_ts = now_ts
                             save_state()
                             
                             return {
@@ -600,7 +605,7 @@ async def handle_tick(request: Request):
                         
                         # Scenario B: Buy Side is Already Running
                         else:
-                            print(f"[HEDGE] Appending {hedge_lots} lots to existing BUY session")
+                            print(f"[HEDGE] Augmenting Existing Buy Session")
                             
                             # Get last executed index
                             indices = sorted([int(k) for k in rt.buy_exec_map.keys()])
@@ -627,7 +632,7 @@ async def handle_tick(request: Request):
                                 profit=0,
                                 timestamp=datetime.now().isoformat()
                             )
-                            rt.buy_last_order_sent_ts = now_ts  # Mark timestamp
+                            rt.buy_last_order_sent_ts = now_ts
                             save_state()
                             
                             return {
@@ -642,7 +647,7 @@ async def handle_tick(request: Request):
             tp_result = check_tp_buy(tick)
             if tp_result == 1:
                 rt.buy_is_closing = True
-                print("[BUY TP HIT] Initiating Buy Close Sequence...")
+                print("[BUY SNAP-BACK] Profit Target Reached. Closing Vector...")
                 save_state()
                 return {"action": "CLOSE_ALL", "comment": rt.buy_id}
 
@@ -651,7 +656,7 @@ async def handle_tick(request: Request):
             tp_result = check_tp_sell(tick)
             if tp_result == 1:
                 rt.sell_is_closing = True
-                print("[SELL TP HIT] Initiating Sell Close Sequence...")
+                print("[SELL SNAP-BACK] Profit Target Reached. Closing Vector...")
                 save_state()
                 return {"action": "CLOSE_ALL", "comment": rt.sell_id}
 
@@ -664,7 +669,7 @@ async def handle_tick(request: Request):
             mt5_count = count_active_trades(tick, rt.buy_id)
             
             if mt5_count == 0:
-                print(f"[EXTERNAL CLOSE] Buy Session Ended Manually.")
+                print(f"[EXTERNAL CLOSE] Buy Session Manually Terminated.")
                 if rt.cyclic_on:
                     rt.buy_id = ""
                     rt.buy_exec_map = {}
@@ -684,7 +689,7 @@ async def handle_tick(request: Request):
             mt5_count = count_active_trades(tick, rt.sell_id)
             
             if mt5_count == 0:
-                print(f"[EXTERNAL CLOSE] Sell Session Ended Manually.")
+                print(f"[EXTERNAL CLOSE] Sell Session Manually Terminated.")
                 if rt.cyclic_on:
                     rt.sell_id = ""
                     rt.sell_exec_map = {}
@@ -697,21 +702,21 @@ async def handle_tick(request: Request):
                     rt.sell_hedge_triggered = False
                 save_state()
         
-        # Priority 4: BUY Entry (Skip if hedge triggered)
+        # Priority 4: Elastic Grid Expansion - BUY (Accumulation Phase)
         if rt.buy_on and not rt.buy_is_closing and not rt.buy_hedge_triggered:
             if not rt.buy_id:
                 rt.buy_id = get_hash("buy")
                 rt.buy_exec_map = {}
                 rt.buy_start_ref = st.buy_limit_price if st.buy_limit_price > 0 else tick.ask
                 rt.buy_waiting_limit = st.buy_limit_price > 0
-                print(f"[BUY] Start: {rt.buy_id} Ref: {rt.buy_start_ref}")
+                print(f"[ELASTIC START] Buy Vector Initiated: {rt.buy_id} | Anchor: {rt.buy_start_ref}")
                 save_state()
             
             if rt.buy_waiting_limit:
                 if tick.ask <= st.buy_limit_price:
                     rt.buy_waiting_limit = False
                     rt.buy_start_ref = tick.ask
-                    print(f"[BUY] Limit price reached. Starting grid at {rt.buy_start_ref}")
+                    print(f"[LIMIT TRIGGER] Buy Anchor Set at {rt.buy_start_ref}")
                     save_state()
             else:
                 idx = len(rt.buy_exec_map)
@@ -728,8 +733,8 @@ async def handle_tick(request: Request):
                             profit=0, 
                             timestamp=datetime.now().isoformat()
                         )
-                        rt.buy_last_order_sent_ts = now_ts  # Mark timestamp
-                        print(f"[BUY] L{idx}: {target}")
+                        rt.buy_last_order_sent_ts = now_ts
+                        print(f"[GRID EXPANSION] Buy Strata {idx} Reached: {target}")
                         save_state()
                         return {
                             "action": "BUY",
@@ -738,21 +743,21 @@ async def handle_tick(request: Request):
                             "alert": row.alert
                         }
         
-        # Priority 5: SELL Entry (Skip if hedge triggered)
+        # Priority 5: Elastic Grid Expansion - SELL (Accumulation Phase)
         if rt.sell_on and not rt.sell_is_closing and not rt.sell_hedge_triggered:
             if not rt.sell_id:
                 rt.sell_id = get_hash("sell")
                 rt.sell_exec_map = {}
                 rt.sell_start_ref = st.sell_limit_price if st.sell_limit_price > 0 else tick.bid
                 rt.sell_waiting_limit = st.sell_limit_price > 0
-                print(f"[SELL] Start: {rt.sell_id} Ref: {rt.sell_start_ref}")
+                print(f"[ELASTIC START] Sell Vector Initiated: {rt.sell_id} | Anchor: {rt.sell_start_ref}")
                 save_state()
             
             if rt.sell_waiting_limit:
                 if tick.bid >= st.sell_limit_price:
                     rt.sell_waiting_limit = False
                     rt.sell_start_ref = tick.bid
-                    print(f"[SELL] Limit price reached. Starting grid at {rt.sell_start_ref}")
+                    print(f"[LIMIT TRIGGER] Sell Anchor Set at {rt.sell_start_ref}")
                     save_state()
             else:
                 idx = len(rt.sell_exec_map)
@@ -769,8 +774,8 @@ async def handle_tick(request: Request):
                             profit=0,
                             timestamp=datetime.now().isoformat()
                         )
-                        rt.sell_last_order_sent_ts = now_ts  # Mark timestamp
-                        print(f"[SELL] L{idx}: {target}")
+                        rt.sell_last_order_sent_ts = now_ts
+                        print(f"[GRID EXPANSION] Sell Strata {idx} Reached: {target}")
                         save_state()
                         return {
                             "action": "SELL",
@@ -782,7 +787,7 @@ async def handle_tick(request: Request):
         return {"action": "WAIT"}
         
     except Exception as e:
-        print(f"[ERROR] Tick: {e}")
+        print(f"[ERROR] Tick Processing Failed: {e}")
         traceback.print_exc()
         return {"action": "WAIT"}
 
@@ -858,9 +863,10 @@ async def update_settings(new: UserSettings):
         state.settings.rows_sell = final_sell_rows
         
         save_state()
+        print("[CONFIG] System Settings Updated")
         return {"status": "ok"}
     except Exception as e:
-        print(f"[ERROR] Settings: {e}")
+        print(f"[ERROR] Settings Update Failed: {e}")
         raise
 
 @app.post("/api/control")
@@ -874,6 +880,7 @@ async def control(
         rt = state.runtime
         
         if emergency_close:
+            print("[EMERGENCY] CLOSE ALL COMMAND RECEIVED")
             rt.buy_on = rt.sell_on = rt.cyclic_on = False
             rt.buy_is_closing = rt.sell_is_closing = True 
             rt.pending_actions.append("CLOSE_ALL_EMERGENCY")
@@ -899,7 +906,7 @@ async def control(
         save_state()
         return {"status": "ok"}
     except Exception as e:
-        print(f"[ERROR] Control: {e}")
+        print(f"[ERROR] Control Command Failed: {e}")
         raise
 
 @app.get("/api/ui-data")
