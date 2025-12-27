@@ -55,10 +55,10 @@ We will use a virtual environment and run the server using `screen` so it stays 
     ```bash
     # Create virtual environment
     python3 -m venv venv
-    
+
     # Activate it
     source venv/bin/activate
-    
+
     # Install requirements
     pip install -r requirements.txt
     ```
@@ -107,7 +107,7 @@ For production, we will **build** the optimized files and serve them using a lig
 
     _Look for `const API_BASE_URL`. Change it to:_
     `const API_BASE_URL = "http://YOUR_AWS_IP:8000";`
-    
+
     _Save: Press `Ctrl+O`, `Enter`. Exit: Press `Ctrl+X`._
 
 4.  **Build for Production:**
@@ -150,3 +150,18 @@ Everything is now running.
 - **To check Frontend logs:** `screen -r frontend`
 - **To detach from screen:** `CTRL+A`, `D`
 - **To kill a screen:** Inside the screen, press `CTRL+C`, then type `exit`.
+
+### ⚙️. Maintenance Commands
+
+Use these commands if you need to view logs or restart the bot.
+
+| Action                     | Command                      |
+| :------------------------- | :--------------------------- |
+| **View running sessions**  | `screen -ls`                 |
+| **Re-enter Backend logs**  | `screen -r backend`          |
+| **Re-enter Frontend logs** | `screen -r frontend`         |
+| **Stop Backend**           | `screen -X -S backend quit`  |
+| **Stop Frontend**          | `screen -X -S frontend quit` |
+| **Kill all sessions**      | `killall screen`             |
+
+---
